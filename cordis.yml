@@ -1,0 +1,9 @@
+# 本地开发用的 Cordis 覆盖层。
+# 1. 把下面的绝对路径替换成你机器上 dsh-safety-toolkit 的实际路径（必须是绝对路径）。
+# 2. 启动：pnpm dsh web --patch ./cordis.yml
+# 3. 只想先用工具、不启用强制策略时，删掉 safety-governance 那一项。
+- insert:
+    - id: safety-toolkit
+      name: '/ABSOLUTE/PATH/TO/dsh-safety-toolkit/src/index.ts'
+    - id: safety-governance
+      name: '/ABSOLUTE/PATH/TO/dsh-safety-toolkit/src/governance.ts'

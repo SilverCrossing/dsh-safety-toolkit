@@ -1,0 +1,8 @@
+# Bundle 层：dsh plugin add 安装本包后，profile 会应用这个 patch。
+# 插件行按【包名】引用，交给 Node 模块解析（不是相对路径）。
+# 本地开发调试请用同目录下的 cordis.yml（绝对路径 overlay）。
+- insert:
+    - id: safety-toolkit
+      name: dsh-safety-toolkit
+    - id: safety-governance
+      name: dsh-safety-toolkit/governance
