@@ -32,7 +32,6 @@
     "dsh": ">=0.2.0"
   },
   "scripts": {
-    "prepare": "tsc -p tsconfig.build.json --noCheck",
     "build": "tsc -p tsconfig.build.json --noCheck",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
