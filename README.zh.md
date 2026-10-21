@@ -1,17 +1,16 @@
 # DeepSeek Harness 安全工具包
 
-给 dsh 补上「破坏性操作可逆、写入门禁、结构化返回」这三件事。一期 7 个工具，外加一个可独立开关的治理插件。
-lib/ 已随仓库提交，安装时不需要构建；改完源码要手动 npm run build 再 commit
+给 dsh 补上「破坏性操作可逆、写入门禁、结构化返回」这三件事。7 个工具，外加一个可独立开关的治理插件。
 
 ## 与弥亚工具箱的关系
 
 设计思路参考了 AstrBot 平台的 [弥亚开发工具箱](https://github.com/irmia2026/irmia_devkit_open)（作者 伊尔弥亚，AGPL-3.0）：它把「改动前留快照 → 修改 → 校验 → 不通过就还原」做成了成套工具，这个范式值得学。
 
-本项目是面向 DeepSeek Harness 的**独立实现**：不含弥亚工具箱的任何源码、文档或注释，备份布局、匹配消歧算法与返回结构均为自研；工具命名沿用其风格，只为迁移时便于对应。两者没有隶属关系，本项目也不是弥亚工具箱的官方移植版。
+本项目是面向 DeepSeek Harness 的**独立实现**：不含弥亚工具箱的任何源码、文档或注释，快照布局、匹配消歧算法与返回结构均为自研；工具命名沿用其风格，只为迁移时便于对应。两者没有隶属关系，本项目也不是弥亚工具箱的官方移植版。
 
 弥亚那 60 多个工具里，大部分在 dsh 里已被 `bash` / `read` / `grep` / `lsp` / `web_fetch` 覆盖，照搬只会增加模型的选择负担。所以这里只补 dsh 真正缺的三类语义：
 
-- **可逆**：`edit` / `write` 出错就是出错，dsh 没有备份与回滚
+- **可逆**：`edit` / `write` 出错就是出错，dsh 没有快照与回滚
 - **门禁**：写完立刻知道语法炸没炸，而不是等到构建时
 - **结构化**：返回计数与建议，而不是让模型啃原始输出
 
@@ -23,36 +22,88 @@ lib/ 已随仓库提交，安装时不需要构建；改完源码要手动 npm r
 | `safe_write` | 替代 `write` | 目标已存在时默认拒绝（返回提案），需显式 `overwrite=true` |
 | `multi_edit` | 跨文件原子编辑 | 全部在内存中应用并过门禁，全通过才落盘；任一失败零文件变更 |
 | `safe_rollback` | 回滚 | 可反复回滚到同一版本；回滚前的状态另存为撤销点 |
-| `safe_backups` | 查看备份 | 可按文件过滤 |
+| `safe_backups` | 查看与管理快照 | 干净 id；`pin` / `unpin` 控制是否受保护 |
 | `syntax_check` | 只读语法门禁 | Python / JS / Go / JSON 真检查，TS / Rust 明确返回 skipped |
 | `test_runner` | 跑测试 | 输出 passed / failed / skipped 计数，自动探测 pytest / go / cargo / npm |
 
-快照位置：`<workspace>/.dsh-backups/<编码后的路径>/<时间戳>-<随机>.bak`，`.new` 后缀表示"改动前文件不存在"，回滚时会删掉文件而不是写空内容。回滚撤销点单独存放在 `pre-rollback/` 子目录，不会被默认回滚选中。用 `DSH_SAFETY_BACKUP_DIR` 可以把整棵快照树移到工作区外。
+## 快照与保留策略
+
+### 存放位置
+
+默认全局根：`~/.dsh/safety-backups`（Windows 为 `C:\Users\<你>\.dsh\safety-backups`），由 `DSH_SAFETY_BACKUP_DIR` 覆盖。**一个全局根对应一份 1GB 配额**，不是每个工作区各 1GB。
+
+```
+~/.dsh/safety-backups/
+└── safe-edit.ts~a1b2c3d4~9f8e7d6c/          ← 一个源文件一个目录
+    ├── source.json                          ← 记录原文件绝对路径
+    ├── 20261021T190500123Z~edit.bak
+    ├── 20261021T190512044Z~edit.bak
+    └── 20261021T190530091Z~rollback.bak.keep
+```
+
+目录名三段：`<原文件名>~<工作区哈希8>~<相对路径哈希8>`。两个哈希保证不同工作区、不同目录下的同名文件不会互相覆盖，文件名保留可读性。目录权限 `0700`、文件 `0600`。
+
+`kind=edit` 是改动前快照（`safe_rollback` 的默认目标）；`kind=rollback` 是回滚撤销点，必须显式指定 id 才会被选中。
+
+### 清理规则
+
+按优先级从强到弱：
+
+```
+受保护(.keep)  >  保护期(24h)  >  每文件份数  >  最大年龄  >  总量配额
+```
+
+- 受保护快照**永不自动删除**，哪怕配额已经超了
+- 保护期内的快照一律不自动删，只能手动清理
+- 清理**只在实际超限时**执行删除，没超限就只统计
+- 清理在**写操作之前**运行，保证新快照一定写得下
+- 任何异常都被吞掉，维护任务绝不影响编辑主流程
+
+### 配额耗尽时会怎样
+
+无法腾出空间时进入降级状态：
+
+| 操作 | 降级时的行为 |
+| --- | --- |
+| `safe_edit` / `safe_write` / `multi_edit` | 拒绝，返回原因与处理建议 |
+| `safe_rollback` | 仍然允许；撤销点降级为尽力而为，结果会说明"本次没有撤销点" |
+| `safe_backups` / `syntax_check` / 只读操作 | 始终允许 |
+
+拒绝理由是"当前工作不可回滚"，而不是"工具坏了"——宁可停下，也不留下一堆无法恢复的修改。恢复方式：`unpin` 取消某些保护、手动删除旧快照，或调大 `DSH_SAFETY_BACKUP_MAX_BYTES`。
+
+### 参数
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `DSH_SAFETY_BACKUP_DIR` | `~/.dsh/safety-backups` | 相对路径按用户主目录解析，不按进程 cwd |
+| `DSH_SAFETY_BACKUP_MAX_BYTES` | `1073741824`（1GB） | 全局总量上限，`0` 关闭 |
+| `DSH_SAFETY_BACKUP_MAX_AGE_DAYS` | `14` | 超过即删，`0` 关闭 |
+| `DSH_SAFETY_BACKUP_MIN_AGE_HOURS` | `24` | 保护期，此内一律不自动删 |
+| `DSH_SAFETY_BACKUP_KEEP_PER_FILE` | `10` | 每个源文件保留份数 |
+| `DSH_SAFETY_BACKUP_THROTTLE_MINUTES` | `5` | 正常状态下的清理间隔；降级状态不节流 |
+| `DSH_SAFETY_BACKUP_MIN_FREE_MB` | `100` | 备份分区最低剩余空间，不足则拒绝写入 |
 
 ## 治理插件（governance）
 
-启用后会做两件事：
+启用后做三件事：
 
-1. **全局 `ctx.tools.guard()`** 单调拒绝 `write` 与 `edit`，并提示改用 `safe_write` / `safe_edit`。用全局 guard 而不是作用域 `restrict`，是因为 subagent 不继承作用域限制，只有全局守卫能一起兜住。
-2. **注入提示词段落**，约束 `bash` 的用法：
+1. **按实际部署探测 shell** 并生成提示词：有 `bash` 就点名 `cat >` / `tee` / `sed -i`，有 `pwsh` 就点名 `Set-Content` / `Out-File` / 重定向。
+2. **作用域遮蔽**：在 `agent/created` 时为每个 agent 安装 `tools.restrict({ deny: ['write','edit'] })`，让这两个名字从工具表和提示词里消失。没有对应工具注册时自动跳过，避免 `unknown tool` 报错。
+3. **全局单调守卫**兜底：`ctx.tools.guard()` 拒绝 `write` / `edit` 运行期调用。作用域限制不会向下继承给 subagent，只有全局守卫能一起覆盖。
 
-```
-[安全编辑策略]
-- 新建或整体覆盖文件用 safe_write；局部修改用 safe_edit；...
-- bash 没有被硬性限制：构建、测试、查看、临时文件都可以用。但不要用 bash 写仓库文件。
-```
+`bash` / `pwsh` **不做硬约束**，只做提示词软约束：shell 重定向写文件的方式，工具层守卫无法可靠检查，假装拦得住只是安全表演。
 
 ## 安装
 
-### 方式一：从 GitHub 安装（推荐，便于更新）
+### 方式一：从 GitHub 安装
 
 ```sh
 dsh plugin --profile my-profile add github:你的账号/dsh-safety-toolkit
 ```
 
-`lib/` 构建产物随仓库提交，安装时不需要跑任何构建脚本，因此不会触发 pnpm 的 `allowBuilds` 授权要求。改完源码记得 `npm run build` 再提交。
+`lib/` 构建产物随仓库提交，安装时不需要跑构建脚本，因此不会触发 pnpm 的 `allowBuilds` 授权要求。改完源码记得 `npm run build` 再提交。
 
-唯一的前提：私有仓库需要本机已有可用的 git 凭据（HTTPS token 或 SSH key），否则 clone 会失败。
+唯一前提：私有仓库需要本机已有可用的 git 凭据（HTTPS token 或 SSH key）。
 
 ### 方式二：本地 checkout
 
@@ -67,7 +118,7 @@ dsh plugin --profile demo add /absolute/path/to/dsh-safety-toolkit
 pnpm dsh web --patch ./cordis.yml
 ```
 
-覆盖层直接加载 `src/*.ts`，不需要构建，适合开发时反复试。
+覆盖层直接加载 `src/*.ts`，不需要构建。
 
 ### 验证
 
@@ -77,28 +128,32 @@ dsh --profile my-profile --dump-config   # 应能看到 safety-toolkit 与 safet
 
 只想用工具、不启用强制策略时，删掉 `cordis.patch.yml` 里的 `safety-governance` 那一行。
 
-### 关于构建
+## 关于构建
 
 `build` 用 `tsc --noCheck`，只做转译不做类型检查：安装环境里没有 `@deepseek-ai/*` 的类型声明，做类型检查会以非零退出码结束。
 
-**刻意不声明 `prepare` 脚本**：只要 `package.json` 里存在 install 生命周期脚本，pnpm 就要求 `allowBuilds` 授权并报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`；而授权 key 带 commit hash，每次 push 都会失效。产物随仓库提交后，这条路彻底不需要了。改完源码在提交前跑一次 `npm run build` 即可。
+**刻意不声明 `prepare` 脚本**：只要 `package.json` 里存在 install 生命周期脚本，pnpm 就要求 `allowBuilds` 授权并报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`；而授权 key 带 commit hash，每次 push 都会失效。产物随仓库提交后，这条路彻底不需要了。
 
-真要做类型检查，在 dsh 源码 checkout 里跑：
+本地开发要装依赖再构建：
 
 ```sh
-npm run typecheck
+npm install --legacy-peer-deps
+npm run build
 ```
+
+真要做类型检查，在 dsh 源码 checkout 里跑 `npm run typecheck`。
 
 ## 已知限制
 
-- **shell 是逃生门**：提示词会按实际部署探测出 `bash` / `pwsh` 并分别点名对应的绕过写法（`cat >`、`tee`、`sed -i` / `Set-Content`、`Out-File`、`>>`），但不硬拦。shell 重定向写文件的方式，工具层的守卫无法可靠检查，假装拦得住只是安全表演。
-- **subagent 不继承作用域限制**：带作用域的注册不会向下继承给 subagent。所以治理层是双保险：主 agent 用 `restrict` 把 write/edit 从工具表移除，全局 `guard()` 再把所有 agent（含 subagent）的运行期调用拒掉。
-- **TypeScript / Rust 不做语法检查**：需要项目级类型信息（`tsc --noEmit` / `cargo check`），本工具不代跑。这跟部署里有没有 `lsp` 工具无关，不要指望它兜底。
-- **快照会写进工作区**：默认在 `<workspace>/.dsh-backups/`，请加进你自己的 `.gitignore`；或设 `DSH_SAFETY_BACKUP_DIR` 指到工作区外。
-- **Python 解释器需要能真实执行**：门禁会依次探测 `python3` / `python` / `py -3` 并跑一段真代码验证。Windows 上 `python3` 常是应用执行别名占位符（退出码 9009），会被正确判为「检查器不可用」并跳过，而不是误判语法错误。可用 `DSH_SAFETY_PYTHON` 指定解释器路径。
+- **shell 是逃生门**：提示词会点名实际存在的 shell 与对应写法，但不硬拦。工具层无法可靠解析命令字符串。
+- **subagent 不继承作用域限制**：所以治理层是双保险——主 agent 用 `restrict` 让 write/edit 消失，全局 `guard()` 把包括 subagent 在内的运行期调用拒掉。
+- **TypeScript / Rust 不做语法检查**：需要项目级类型信息（`tsc --noEmit` / `cargo check`），本工具不代跑，跟部署里有没有 `lsp` 工具无关。
+- **Python 解释器需要能真实执行**：门禁依次探测 `python3` / `python` / `py -3` 并跑一段真代码验证。Windows 上的应用执行别名占位符（退出码 9009）会被正确判为"检查器不可用"而非语法错误。可用 `DSH_SAFETY_PYTHON` 指定解释器。
+- **只有非零退出的明确语法诊断才算错误**：检查器本身异常时返回 `skipped`，宁可放行也不误判。
+- **敏感文件不做特殊处理**：`.env`、密钥文件同样按普通文件快照。如果不想让它们落盘，请自行调整 `DSH_SAFETY_BACKUP_DIR` 或不要用安全工具改这些文件。
 
-## 安全边界
+## 安全提醒
 
-- 所有路径都相对 **agent 工作目录** 解析，越界直接拒绝（`WorkspaceBoundaryError`），符号链接会解析到最深的已存在祖先再判断。
-- 工作目录来自执行上下文（`ctx.workingDirectory.ensure(agent, signal)`），**不接受工具参数传根目录**，避免模型自己重定义边界。
-- 每次写入都产生备份；备份写入失败则中止本次操作，不落一个"无法回滚"的修改。
+1. 快照里是**文件原文**，可能包含密钥、token、`.env` 内容。目录权限已设 `0700/0600`，但仍请**不要**把备份根放进版本库，也不要放进 OneDrive / Dropbox 这类同步目录。
+2. 默认备份根在 `~/.dsh/` 下，不在工作区，所以 `git clean -fdx` 碰不到；一旦你把 `DSH_SAFETY_BACKUP_DIR` 指到工作区内，一次 `git clean -fdx` 就会连同快照一起删掉。
+3. 受保护快照（`.keep`）永不自动删除，这是配额被吃满的唯一合法原因。满了会拒绝写入，需要手动处理。

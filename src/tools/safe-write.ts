@@ -13,6 +13,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { createBackup, exists } from '../lib/backup.js'
+import { backupRoot } from '../lib/layout.js'
+import { ensureCapacity, loadPolicy } from '../lib/retention.js'
 import { OUTCOME_SCHEMA, renderOutcome, type ToolOutcome } from '../lib/outcome.js'
 import { resolveInsideWorkspace } from '../lib/paths.js'
 import { checkSyntax } from '../lib/syntax.js'
@@ -51,6 +53,15 @@ export function safeWriteTool(ctx: Context) {
 
       if (previous === args.content) {
         return { ok: true, message: '内容与现有文件一致，未做改动', files: [{ path: absolute, changed: false }] }
+      }
+
+      const capacity = await ensureCapacity(backupRoot(), Buffer.byteLength(previous ?? '', 'utf8'), loadPolicy())
+      if (!capacity.ok) {
+        return {
+          ok: false,
+          message: `已拒绝写入：${capacity.detail ?? '备份空间不足'}`,
+          next: capacity.advice ?? '请清理备份空间后重试。',
+        }
       }
 
       const backup = await createBackup(workspace, absolute, previous)

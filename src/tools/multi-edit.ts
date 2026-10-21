@@ -12,6 +12,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { createBackup } from '../lib/backup.js'
+import { backupRoot } from '../lib/layout.js'
+import { ensureCapacity, loadPolicy } from '../lib/retention.js'
 import { applyEdit } from '../lib/edit.js'
 import { OUTCOME_SCHEMA, renderOutcome, type FileOutcome, type SyntaxVerdict, type ToolOutcome } from '../lib/outcome.js'
 import { resolveInsideWorkspace } from '../lib/paths.js'
@@ -110,6 +112,16 @@ export function multiEditTool(ctx: Context) {
               next: '修正后重新提交整批，没有任何文件被修改。',
             }
           }
+        }
+      }
+
+      const required = [...originals.values()].reduce((sum, text) => sum + Buffer.byteLength(text, 'utf8'), 0)
+      const capacity = await ensureCapacity(backupRoot(), required, loadPolicy())
+      if (!capacity.ok) {
+        return {
+          ok: false,
+          message: `已拒绝写入：${capacity.detail ?? '备份空间不足'}`,
+          next: capacity.advice ?? '请清理备份空间后重试。',
         }
       }
 

@@ -36,14 +36,16 @@ export function safeRollbackTool(ctx: Context) {
       if (result.restored === undefined) {
         return {
           ok: false,
-          message: `没有找到可用的备份：${absolute}`,
-          next: '先用 safe_backups 列出可用备份，或确认该文件是否被 safe_* 工具修改过。',
+          message: `没有找到可回滚的快照：${absolute}`,
+          next: '用 safe_backups 确认该文件是否有快照；只有被 safe_edit / safe_write / multi_edit 修改过的文件才会产生快照。',
         }
       }
 
-      const undo = result.preRollback === undefined
-        ? ''
-        : `；回滚前的状态已存为 ${result.preRollback.id}，可用它撤销本次回滚`
+      const undo = result.preRollback !== undefined
+        ? `；回滚前的状态已存为 ${result.preRollback.id}，可用它撤销本次回滚`
+        : result.undoSkipReason === undefined
+          ? ''
+          : `；注意：本次回滚没有生成撤销点（${result.undoSkipReason}），无法撤回这次回滚`
 
       return {
         ok: true,

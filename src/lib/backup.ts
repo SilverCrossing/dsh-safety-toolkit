@@ -1,37 +1,50 @@
 /**
- * Content-addressed backups stored inside the workspace.
+ * Snapshot storage: one directory per source file inside a global root.
  *
- * Layout:
- *   `<backup root>/<encoded-path>/<stamp>-<random>.bak`            edit snapshots
- *   `<backup root>/<encoded-path>/pre-rollback/<stamp>-<random>.bak`  rollback undo points
+ *   <root>/<basename>~<wsHash8>~<relHash8>/
+ *     source.json                      records the original absolute path
+ *     20261021T190500123Z~edit.bak
+ *     20261021T190530456Z~rollback.bak.keep
  *
- * A `.new` suffix records "this file did not exist before", so a rollback
- * deletes it instead of restoring empty content.
- *
- * Restoring never consumes the backup it reads: the same version can be rolled
- * back to repeatedly, and the state before each rollback is snapshotted into
- * `pre-rollback/` so the rollback itself can be undone.
+ * Restoring never consumes the snapshot it reads; the state being replaced is
+ * snapshotted into a `rollback` entry first (best effort) so a rollback can be
+ * undone. If that undo point cannot be written, the rollback still proceeds and
+ * says so — being unable to roll back is worse than lacking an undo point.
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { join, relative, sep } from 'node:path'
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
-export const BACKUP_DIR_NAME = '.dsh-backups'
-const PRE_ROLLBACK_DIR = 'pre-rollback'
+import {
+  backupRoot,
+  buildSnapshotName,
+  fileDirectoryName,
+  parseSnapshotName,
+  parseStamp,
+  SOURCE_META,
+  stampOf,
+  withProtection,
+  type BackupKind,
+} from './layout.js'
+import { ensureCapacity, loadPolicy } from './retention.js'
 
-export type BackupKind = 'edit' | 'pre-rollback'
+export { SOURCE_META } from './layout.js'
+export type { BackupKind } from './layout.js'
 
 export interface BackupRecord {
-  /** File name of the backup inside its kind directory. */
+  /** Snapshot file name, safe to pass back as `backup_name`. */
   readonly id: string
-  /** Absolute path of the file the backup restores. */
+  /** Absolute path of the file this snapshot restores. */
   readonly path: string
-  /** ISO-ish timestamp encoded in the file name. */
+  /** ISO-ish timestamp derived from the file name. */
   readonly createdAt: string
-  /** False when the target did not exist before the tracked write. */
+  /** False when the file did not exist before the tracked write. */
   readonly existed: boolean
   readonly kind: BackupKind
+  /** True when the `.keep` suffix prevents automatic removal. */
+  readonly protected: boolean
+  readonly size: number
 }
 
 export interface RestoreResult {
@@ -40,21 +53,8 @@ export interface RestoreResult {
   readonly preRollback?: BackupRecord
   /** True when the rollback removed the file (it did not exist before the edit). */
   readonly deleted: boolean
-}
-
-/**
- * Backup root. `DSH_SAFETY_BACKUP_DIR` moves snapshots outside the workspace,
- * which keeps repository working trees clean.
- */
-export function backupRoot(workspace: string): string {
-  const override = process.env.DSH_SAFETY_BACKUP_DIR
-  return override !== undefined && override.trim() !== '' ? override.trim() : join(workspace, BACKUP_DIR_NAME)
-}
-
-/** Stable, human-readable directory name for one absolute path. */
-export function encodePath(workspace: string, absolute: string): string {
-  const rel = relative(workspace, absolute)
-  return rel === '' ? '__root__' : rel.split(sep).join('__')
+  /** Why no undo point was written, when one was expected but skipped. */
+  readonly undoSkipReason?: string
 }
 
 export async function exists(absolute: string): Promise<boolean> {
@@ -66,30 +66,54 @@ export async function exists(absolute: string): Promise<boolean> {
   }
 }
 
-function buildName(previous: string | null): string {
-  const stamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')
-  const suffix = previous === null ? '.new' : '.bak'
-  return `${stamp}-${randomUUID().slice(0, 8)}${suffix}`
+export function backupDirFor(workspace: string, absolute: string): string {
+  return join(backupRoot(), fileDirectoryName(workspace, absolute))
 }
 
-function parseName(absolute: string, name: string, kind: BackupKind): BackupRecord | undefined {
-  const match = /^(\d{4}-\d{2}-\d{2}T[\d-]+Z)-[0-9a-f]{8}(\.new|\.bak)$/.exec(name)
-  if (match === null) return undefined
-  return {
-    id: name,
-    path: absolute,
-    createdAt: match[1]!,
-    existed: match[2] === '.bak',
-    kind,
+async function ensureDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  await chmod(directory, 0o700).catch(() => {})
+}
+
+async function ensureSourceMeta(directory: string, workspace: string, absolute: string): Promise<void> {
+  const target = join(directory, SOURCE_META)
+  if (await exists(target)) return
+  await writeFile(target, JSON.stringify({ workspace, path: absolute }, null, 2), { mode: 0o600, encoding: 'utf8' })
+}
+
+interface SourceMeta {
+  readonly workspace: string
+  readonly path: string
+}
+
+async function readSourceMeta(directory: string): Promise<SourceMeta | undefined> {
+  try {
+    const raw = await readFile(join(directory, SOURCE_META), 'utf8')
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const record = parsed as Record<string, unknown>
+    if (typeof record.workspace !== 'string' || typeof record.path !== 'string') return undefined
+    return { workspace: record.workspace, path: record.path }
+  } catch {
+    return undefined
   }
 }
 
+async function uniqueStamp(directory: string, kind: BackupKind, absent: boolean): Promise<string> {
+  const base = stampOf(new Date())
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    const stamp = attempt === 1 ? base : `${base}-${attempt}`
+    if (!(await exists(join(directory, buildSnapshotName(stamp, kind, absent, false))))) return stamp
+  }
+  return `${base}-${randomUUID().slice(0, 4)}`
+}
+
 /**
- * Snapshot the previous content of one file.
- * @param workspace - absolute workspace root.
- * @param absolute - absolute path of the file about to be written.
+ * Write one snapshot.
+ * @param workspace - workspace root, used for the directory hash and metadata.
+ * @param absolute - absolute path of the file being snapshotted.
  * @param previous - previous content, or null when the file did not exist.
- * @param kind - `edit` for pre-write snapshots, `pre-rollback` for undo points.
+ * @param kind - `edit` for pre-write snapshots, `rollback` for undo points.
  */
 export async function createBackup(
   workspace: string,
@@ -97,91 +121,116 @@ export async function createBackup(
   previous: string | null,
   kind: BackupKind = 'edit',
 ): Promise<BackupRecord> {
-  const base = join(backupRoot(workspace), encodePath(workspace, absolute))
-  const directory = kind === 'pre-rollback' ? join(base, PRE_ROLLBACK_DIR) : base
-  await mkdir(directory, { recursive: true })
-  const id = buildName(previous)
-  await writeFile(join(directory, id), previous ?? '', 'utf8')
-  const stamp = /^(\d{4}-\d{2}-\d{2}T[\d-]+Z)-/.exec(id)
+  const directory = backupDirFor(workspace, absolute)
+  await ensureDirectory(directory)
+  await ensureSourceMeta(directory, workspace, absolute)
+
+  const absent = previous === null
+  const stamp = await uniqueStamp(directory, kind, absent)
+  const name = buildSnapshotName(stamp, kind, absent, false)
+  const target = join(directory, name)
+  await writeFile(target, previous ?? '', { mode: 0o600, encoding: 'utf8' })
+  await chmod(target, 0o600).catch(() => {})
+
   return {
-    id,
+    id: name,
     path: absolute,
-    createdAt: stamp?.[1] ?? id,
-    existed: previous !== null,
+    createdAt: stamp,
+    existed: !absent,
     kind,
+    protected: false,
+    size: Buffer.byteLength(previous ?? '', 'utf8'),
   }
 }
 
-async function readRecords(base: string, absolute: string, kind: BackupKind): Promise<BackupRecord[]> {
-  const names = await readdir(base).catch(() => [] as string[])
+async function readDirectoryRecords(directory: string, fallbackPath: string): Promise<BackupRecord[]> {
+  const names = await readdir(directory).catch(() => [] as string[])
   const records: BackupRecord[] = []
   for (const name of names) {
-    const record = parseName(absolute, name, kind)
-    if (record !== undefined) records.push(record)
+    const parsed = parseSnapshotName(name)
+    if (parsed === undefined) continue
+    const size = await stat(join(directory, name)).then(info => info.size).catch(() => 0)
+    records.push({
+      id: name,
+      path: fallbackPath,
+      createdAt: parsed.stamp,
+      existed: !parsed.absent,
+      kind: parsed.kind,
+      protected: parsed.protected,
+      size,
+    })
   }
   return records
 }
 
-/** List backups newest-first, optionally filtered to one file. */
+/** List snapshots newest-first, optionally scoped to one file. */
 export async function listBackups(workspace: string, absolute?: string): Promise<BackupRecord[]> {
-  const root = backupRoot(workspace)
-  // `encodePath` joins segments with `__`, so a real directory name containing
-  // `__` is ambiguous. Acceptable for a backup index.
-  const directories = absolute === undefined
-    ? (await readdir(root, { withFileTypes: true }).catch(() => []))
-        .filter(entry => entry.isDirectory())
-        .map(entry => entry.name)
-    : [encodePath(workspace, absolute)]
+  if (absolute !== undefined) {
+    const directory = backupDirFor(workspace, absolute)
+    const records = await readDirectoryRecords(directory, absolute)
+    records.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    return records
+  }
 
+  const root = backupRoot()
+  const directories = await readdir(root, { withFileTypes: true }).catch(() => [])
   const records: BackupRecord[] = []
-  for (const directory of directories) {
-    const target = directory === '__root__' ? workspace : join(workspace, directory.split('__').join(sep))
-    const base = join(root, directory)
-    records.push(...await readRecords(base, target, 'edit'))
-    records.push(...await readRecords(join(base, PRE_ROLLBACK_DIR), target, 'pre-rollback'))
+  for (const entry of directories) {
+    if (!entry.isDirectory()) continue
+    const directory = join(root, entry.name)
+    const meta = await readSourceMeta(directory)
+    const records_ = await readDirectoryRecords(directory, meta?.path ?? entry.name)
+    records.push(...records_)
   }
   records.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   return records
 }
 
 /**
- * Restore the newest (or a named) backup for one file.
+ * Restore the newest (or a named) snapshot for one file.
  *
- * The consumed backup is kept on disk, and the content being replaced is
- * snapshotted first, so repeated rollbacks walk history deterministically
- * instead of silently consuming versions.
+ * Snapshot kinds are considered separately: `edit` entries are the normal
+ * rollback targets, `rollback` entries are undo points that must be requested
+ * explicitly by name.
  */
 export async function restoreBackup(
   workspace: string,
   absolute: string,
   backupName?: string,
 ): Promise<RestoreResult> {
-  const base = join(backupRoot(workspace), encodePath(workspace, absolute))
-  const edits = (await readRecords(base, absolute, 'edit')).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  const undoPoints = (await readRecords(join(base, PRE_ROLLBACK_DIR), absolute, 'pre-rollback'))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const directory = backupDirFor(workspace, absolute)
+  const records = await readDirectoryRecords(directory, absolute)
+  const edits = records.filter(record => record.kind === 'edit').sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const undoPoints = records.filter(record => record.kind === 'rollback').sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   let chosen: BackupRecord | undefined
-  let source = base
   if (backupName !== undefined && backupName !== '') {
-    chosen = edits.find(record => record.id === backupName) ?? undoPoints.find(record => record.id === backupName)
-    if (chosen !== undefined && chosen.kind === 'pre-rollback') source = join(base, PRE_ROLLBACK_DIR)
+    chosen = records.find(record => record.id === backupName)
   } else {
     chosen = edits.at(-1)
   }
   if (chosen === undefined) return { deleted: false }
 
-  const content = await readFile(join(source, chosen.id), 'utf8').catch(() => undefined)
+  const content = await readFile(join(directory, chosen.id), 'utf8').catch(() => undefined)
   if (content === undefined) return { deleted: false }
 
   const current = await readFile(absolute, 'utf8').catch(() => null)
   const deleted = !chosen.existed
-
-  // Snapshot before mutating, so a rollback can itself be rolled back.
   const sameAsTarget = deleted ? current === null : current === content
-  const preRollback = sameAsTarget
-    ? undefined
-    : await createBackup(workspace, absolute, current, 'pre-rollback')
+
+  // Best effort: an undo point is nice, but a rollback that cannot proceed is worse.
+  let preRollback: BackupRecord | undefined
+  let undoSkipReason: string | undefined
+  if (!sameAsTarget) {
+    const required = Buffer.byteLength(current ?? '', 'utf8')
+    const capacity = await ensureCapacity(backupRoot(), required, loadPolicy(), { degraded: true })
+    if (capacity.ok) {
+      preRollback = await createBackup(workspace, absolute, current, 'rollback').catch(() => undefined)
+      if (preRollback === undefined) undoSkipReason = '撤销点写入失败'
+    } else {
+      undoSkipReason = capacity.detail ?? '备份配额或磁盘空间不足'
+    }
+  }
 
   if (deleted) await rm(absolute, { force: true })
   else await writeFile(absolute, content, 'utf8')
@@ -190,5 +239,42 @@ export async function restoreBackup(
     restored: chosen,
     ...(preRollback === undefined ? {} : { preRollback }),
     deleted,
+    ...(undoSkipReason === undefined ? {} : { undoSkipReason }),
   }
 }
+
+/** Add or remove the `.keep` protection suffix on one snapshot. */
+export async function setProtection(
+  workspace: string,
+  absolute: string,
+  id: string,
+  protectedFlag: boolean,
+): Promise<BackupRecord | undefined> {
+  const directory = backupDirFor(workspace, absolute)
+  const records = await readDirectoryRecords(directory, absolute)
+  const record = records.find(entry => entry.id === id)
+  if (record === undefined) return undefined
+  if (record.protected === protectedFlag) return record
+
+  const nextName = withProtection(record.id, protectedFlag)
+  if (nextName === record.id) return undefined
+  try {
+    await rename(join(directory, record.id), join(directory, nextName))
+  } catch {
+    return undefined
+  }
+  return { ...record, id: nextName, protected: protectedFlag }
+}
+
+/** Remove one snapshot outright (manual cleanup). */
+export async function deleteBackup(workspace: string, absolute: string, id: string): Promise<boolean> {
+  const directory = backupDirFor(workspace, absolute)
+  try {
+    await unlink(join(directory, id))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export { parseStamp }
