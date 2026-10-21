@@ -1,14 +1,19 @@
 /**
  * Safety governance plugin.
  *
- * Two jobs, both deliberately weak-mechanism:
- *  1. A global monotonic guard denies the built-in `write` / `edit` and points
- *     at the safe replacements. Guards cannot be overridden by later listeners,
- *     and being global it also covers subagents, which do not inherit scoped
- *     tool restrictions.
- *  2. A prompt section states the soft rule for `bash`, which this plugin does
- *     NOT hard-block: shell redirection can write files in ways a tool-level
- *     guard cannot reliably inspect.
+ * Three jobs, ordered from weakest to strongest mechanism:
+ *  1. A prompt section that states the soft rule for the shell tool actually
+ *     present in this deployment (`bash` or `pwsh`, not a hard-coded name).
+ *  2. Per-agent `tools.restrict({ deny })` so `write` / `edit` leave the tool
+ *     list and the prompt entirely — the model cannot "fall back" to a name it
+ *     never sees.
+ *  3. A global monotonic guard as the floor. Guards cannot be overridden by
+ *     later listeners, and unlike scoped restrictions they also cover
+ *     subagents, which do not inherit scoped registrations.
+ *
+ * The shell is intentionally NOT hard-blocked: redirection writes files in ways
+ * a tool-level guard cannot reliably inspect, and pretending otherwise would be
+ * security theater.
  */
 import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "safety-governance";
