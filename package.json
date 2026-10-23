@@ -1,10 +1,14 @@
 {
   "name": "dsh-safety-toolkit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
   "description": "Safety-first file editing, rollback and verification tools for DeepSeek Harness",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SilverCrossing/dsh-safety-toolkit.git"
+  },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
@@ -15,6 +19,10 @@
     "./governance": {
       "types": "./lib/governance.d.ts",
       "default": "./lib/governance.js"
+    },
+    "./contract": {
+      "types": "./lib/contract.d.ts",
+      "default": "./lib/contract.js"
     },
     "./package.json": "./package.json"
   },

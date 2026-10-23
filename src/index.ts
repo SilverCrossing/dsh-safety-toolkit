@@ -1,13 +1,17 @@
 /**
  * Safety toolkit plugin entry.
  *
- * Registers the seven first-phase tools. Governance (denying the built-in
- * `write`/`edit`) lives in `governance.ts` so the two can be enabled
- * independently: a deployment can adopt the tools first, then tighten policy.
+ * Registers the seven tools, then publishes a machine-readable contract so that
+ * guard plugins can discover which tool names this package provides and which
+ * built-in names it replaces.
+ *
+ * Governance (denying the built-in `write`/`edit`) lives in `governance.ts` so
+ * the two can be enabled independently.
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import { Service, type Context } from '@deepseek-ai/cordis'
 
+import { TOOL_CONTRACT, type ToolContract } from './contract.js'
 import { safeBackupsTool } from './tools/safe-backups.js'
 import { safeEditTool } from './tools/safe-edit.js'
 import { safeRollbackTool } from './tools/safe-rollback.js'
@@ -16,8 +20,24 @@ import { multiEditTool } from './tools/multi-edit.js'
 import { syntaxCheckTool } from './tools/syntax-check.js'
 import { testRunnerTool } from './tools/test-runner.js'
 
+export { TOOL_CONTRACT }
+export type { ToolContract, ToolContractEntry } from './contract.js'
+
 export const name = 'safety-toolkit'
 export const inject = ['tools', 'workingDirectory']
+
+/**
+ * Exposes the contract as the `safetyToolkit` service, so a guard can
+ * `inject: ['safetyToolkit']` and read `.contract` without importing this
+ * package. Registering is best-effort: a failure must not cost the tools.
+ */
+export class SafetyToolkitContractService extends Service {
+  readonly contract: ToolContract = TOOL_CONTRACT
+
+  constructor(ctx: Context) {
+    super(ctx, 'safetyToolkit')
+  }
+}
 
 export function apply(ctx: Context): void {
   ctx.tools.register(safeEditTool(ctx))
@@ -27,4 +47,12 @@ export function apply(ctx: Context): void {
   ctx.tools.register(safeBackupsTool(ctx))
   ctx.tools.register(syntaxCheckTool(ctx))
   ctx.tools.register(testRunnerTool(ctx))
+
+  try {
+    new SafetyToolkitContractService(ctx)
+  } catch (error) {
+    // The contract is a convenience for other plugins; its absence must never
+    // take the toolkit down.
+    console.warn(`[safety-toolkit] 契约服务注册失败，工具不受影响：${(error as Error).message}`)
+  }
 }

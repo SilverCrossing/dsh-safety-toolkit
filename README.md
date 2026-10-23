@@ -4,6 +4,68 @@
 
 给 dsh 补上「破坏性操作可逆、写入门禁、结构化返回」这三件事。7 个工具，外加一个可独立开关的治理插件。
 
+## 风险提示：会绕过按工具名匹配的护栏
+
+本插件用 `safe_edit` / `safe_write` / `multi_edit` 替代原生的 `edit` / `write`，治理层还会把原生工具从工具表里移除。
+
+如果你的护栏插件是**按工具名**判断"这是不是写操作"，那么它盯着的 `write` / `edit` 在这里根本不会出现，而 `safe_*` 不在它的名单里——结果是**护栏被整体绕过**，模型改文件时不会弹任何审批。
+
+这不是假设，而是任何未登记 `safe_*` 的按名护栏的必然结果。
+
+### 三种处理方式
+
+| 方式 | 做法 | 结果 |
+| --- | --- | --- |
+| 不共存 | 只装护栏，不装本插件 | 有审批，失去快照与回滚 |
+| 护栏适配 | 确认护栏已覆盖 `safe_edit` / `safe_write` / `multi_edit` / `safe_rollback` / `test_runner` | 审批与回滚同时具备（推荐） |
+| 兜底收紧 | 护栏设 `unknownTools: ask` | 未登记工具一律弹窗，噪音大但 fail-closed |
+
+作者维护的另一款护栏 [write-approval-guard](https://github.com/SilverCrossing/write-approval-guard) 已完成适配，参数名对照如下，方便其他护栏作者复用：
+
+| 工具 | 路径参数 |
+| --- | --- |
+| `safe_edit` / `safe_write` / `safe_rollback` | `filepath` |
+| `multi_edit` | `edits[].file`（逐项判定，取最高风险） |
+| `test_runner` | 无路径参数，按"执行项目代码"处理 |
+| `syntax_check` / `safe_backups` | 只读或仅动备份元数据，无需拦截 |
+
+### 自查
+
+1. 看护栏的覆盖列表里有没有 `safe_edit` / `safe_write` / `multi_edit` / `safe_rollback`
+2. 没有的话，三选一：升级护栏、设 `unknownTools: ask`、或不要同时安装
+3. 装好后实测：让模型用 `safe_write` 新建一个文件，确认是否弹出审批
+
+一句话：**本插件把"写"从原生工具名挪到了 `safe_*`，任何按名匹配的护栏都必须跟着挪。没挪，等于没有护栏。**
+
+### 给护栏作者的接口
+
+上面那张对照表同时是对外契约，机器可读。两种消费方式：
+
+```ts
+// 方式一：注入服务（运行时发现）
+export const inject = ['safetyToolkit']
+// ctx.safetyToolkit.contract.replacedTools  -> ['write', 'edit']
+// ctx.safetyToolkit.contract.tools          -> [{ name, pathArgs, mutating, replaces? }]
+
+// 方式二：子路径导入（构建期已知，适合写死映射）
+import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
+```
+
+字段含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `contractVersion` | 契约格式版本，仅在形状变化时递增 |
+| `plugin` | 提供方包名 |
+| `replacedTools` | 被从工具表移除的原生工具名 |
+| `tools[].name` | 模型可见的工具名 |
+| `tools[].pathArgs` | 路径参数；`edits[].file` 表示数组元素的字段；空数组表示无路径参数 |
+| `tools[].mutating` | 是否会改文件、或执行项目代码 |
+| `tools[].replaces` | 被替代的原生工具名 |
+| `tools[].note` | 护栏可以跳过该工具的理由 |
+
+契约服务是**尽力而为**的：注册失败只打一行警告，工具照常工作。所以护栏应当同时支持"服务不存在时退回静态映射"，而不是硬依赖它。
+
 ## 与弥亚工具箱的关系
 
 设计思路参考了 AstrBot 平台的 [弥亚开发工具箱](https://github.com/irmia2026/irmia_devkit_open)（作者 伊尔弥亚，AGPL-3.0）：它把「改动前留快照 → 修改 → 校验 → 不通过就还原」做成了成套工具，这个范式值得学。
@@ -95,6 +157,8 @@
 2. **作用域遮蔽**：在 `agent/created` 时为每个 agent 安装 `tools.restrict({ deny: ['write','edit'] })`，让这两个名字从工具表和提示词里消失。没有对应工具注册时自动跳过，避免 `unknown tool` 报错。
 3. **全局单调守卫**兜底：`ctx.tools.guard()` 拒绝 `write` / `edit` 运行期调用。作用域限制不会向下继承给 subagent，只有全局守卫能一起覆盖。
 
+注意：第 2 条会把原生工具名从工具表移除，任何按工具名匹配的护栏因此失效——详见上方[风险提示](#风险提示会绕过按工具名匹配的护栏)。
+
 `bash` / `pwsh` **不做硬约束**，只做提示词软约束：shell 重定向写文件的方式，工具层守卫无法可靠检查，假装拦得住只是安全表演。
 
 ## 安装
@@ -161,6 +225,39 @@ npm run build
 1. 快照里是**文件原文**，可能包含密钥、token、`.env` 内容。目录权限已设 `0700/0600`，但仍请**不要**把备份根放进版本库，也不要放进 OneDrive / Dropbox 这类同步目录。
 2. 默认备份根在 `~/.dsh/` 下，不在工作区，所以 `git clean -fdx` 碰不到；一旦你把 `DSH_SAFETY_BACKUP_DIR` 指到工作区内，一次 `git clean -fdx` 就会连同快照一起删掉。
 3. 受保护快照（`.keep`）永不自动删除，这是配额被吃满的唯一合法原因。满了会拒绝写入，需要手动处理。
+
+## 紧急恢复
+
+这个插件会修改 dsh 的写入行为，所以必须能在"自己坏掉"时被绕过。三条路径，都不依赖插件自身：
+
+1. **只关治理层**：删掉 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里的 `safety-governance` 那一行，重启。工具还在，强制策略失效。
+2. **整个插件下线**：`dsh plugin --profile <name> remove dsh-safety-toolkit`，重启。
+3. **最坏情况**：直接编辑上面那个 `cordis.patch.yml`，或从 `$DSH_HOME/profiles/<name>` 的依赖目录里删掉本包。
+
+Windows 上 `$DSH_HOME` 默认是 `C:\Users\<你>\.dsh`。
+
+## 自举风险
+
+插件运行在 dsh 内部，又修改 dsh 的行为，因此有三件事需要知道：
+
+- **改源码不会立即生效**：模块已加载进内存，改动要重启才兑现。所以"模型改掉配额默认值"不是即时提权，而是**重启后生效的持久化后门**。
+- **工作区隔离是第一道防线**：所有文件工具（含 `safe_edit`）都被限制在会话工作区内。插件源码在工作区外时，模型碰不到它。**开发插件时不要把插件目录作为 agent 的工作区。**
+- **按文件名拦截只能提高成本**：用 guard 拒绝写 `retention.ts` 之类的文件，改个名就能绕过。真正可靠的边界是 OS 权限与目录隔离，不是工具层规则。
+
+## 更新
+
+git 依赖会锁定到具体 commit，所以更新不是自动的：
+
+```sh
+# 最稳：删掉重装，确保拉到最新
+dsh plugin --profile <name> remove dsh-safety-toolkit
+dsh plugin --profile <name> add github:SilverCrossing/dsh-safety-toolkit
+
+# 或者先试 update（未必会重新解析 git commit）
+dsh plugin --profile <name> update dsh-safety-toolkit
+```
+
+更新后**必须重启 dsh**（组合在启动时求值，热重载不覆盖组合包变化）。版本号可在 profile 目录的 `package.json` 里核对。
 
 ## 许可证
 

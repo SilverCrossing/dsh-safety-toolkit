@@ -4,6 +4,68 @@ English | [中文](README.md)
 
 Adds the three things DeepSeek Harness (dsh) lacks for file work: **reversible destructive edits, a write gate, and structured results**. Seven tools plus an independently toggleable governance plugin.
 
+## Warning: this bypasses name-matched guards
+
+This plugin replaces the built-in `edit` / `write` with `safe_edit` / `safe_write` / `multi_edit`, and its governance layer removes the built-in tools from the tool list entirely.
+
+If your guard plugin decides "is this a write?" **by tool name**, the names it watches for never appear here, and `safe_*` is not on its list. The result is that **the guard is bypassed wholesale** — the model can change files without a single approval prompt.
+
+That is not a hypothetical; it is the guaranteed outcome for any name-matched guard that has not registered `safe_*`.
+
+### Three ways to handle it
+
+| Approach | What to do | Trade-off |
+| --- | --- | --- |
+| Don't combine | Install the guard only | You get approvals, you lose snapshots and rollback |
+| Adapt the guard | Make sure it covers `safe_edit` / `safe_write` / `multi_edit` / `safe_rollback` / `test_runner` | Approvals and rollback together (recommended) |
+| Tighten the fallback | Set `unknownTools: ask` in the guard | Every unregistered tool prompts; noisy but fail-closed |
+
+The author's companion guard [write-approval-guard](https://github.com/SilverCrossing/write-approval-guard) already covers these names. The argument mapping, for other guard authors:
+
+| Tool | Path argument |
+| --- | --- |
+| `safe_edit` / `safe_write` / `safe_rollback` | `filepath` |
+| `multi_edit` | `edits[].file` (per item, highest risk wins) |
+| `test_runner` | no path argument; treat as "running project code" |
+| `syntax_check` / `safe_backups` | read-only, or metadata only; no interception needed |
+
+### Self-check
+
+1. Look for `safe_edit` / `safe_write` / `multi_edit` / `safe_rollback` in the guard's coverage list
+2. If missing: upgrade the guard, set `unknownTools: ask`, or do not install both
+3. After installing, verify: have the model create a file with `safe_write` and confirm an approval prompt appears
+
+In one line: **this plugin moves "writing" from the built-in tool names to `safe_*`, so every name-matched guard must move with it. If it doesn't, you have no guard.**
+
+### Interface for guard authors
+
+The mapping table above is also a machine-readable contract. Two ways to consume it:
+
+```ts
+// Option 1: inject the service (runtime discovery)
+export const inject = ['safetyToolkit']
+// ctx.safetyToolkit.contract.replacedTools  -> ['write', 'edit']
+// ctx.safetyToolkit.contract.tools          -> [{ name, pathArgs, mutating, replaces? }]
+
+// Option 2: subpath import (known at build time, for hard-coded maps)
+import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
+```
+
+Fields:
+
+| Field | Meaning |
+| --- | --- |
+| `contractVersion` | Contract format version; bumped only on shape changes |
+| `plugin` | Providing package name |
+| `replacedTools` | Built-in tool names removed from the tool list |
+| `tools[].name` | Model-facing tool name |
+| `tools[].pathArgs` | Path arguments; `edits[].file` means a field inside array elements; empty means no path |
+| `tools[].mutating` | Whether the call can change files or run project code |
+| `tools[].replaces` | Built-in tool this one replaces |
+| `tools[].note` | Why a guard may skip this tool |
+
+The contract service is **best-effort**: a failed registration logs one warning and the tools keep working. Guards should therefore fall back to a static map when the service is absent, rather than depending on it.
+
 ## Relationship to Irmia DevKit
 
 The design is inspired by [Irmia DevKit](https://github.com/irmia2026/irmia_devkit_open) (by 伊尔弥亚, AGPL-3.0) for the AstrBot platform, which turned "snapshot before change → edit → verify → restore on failure" into a coherent tool family.
@@ -94,6 +156,8 @@ When enabled it does three things:
 2. **Scope shadowing**: on `agent/created` it installs `tools.restrict({ deny: ['write','edit'] })` for every agent, so those names disappear from the tool list and the prompt. It skips names that are not registered, avoiding `unknown tool` errors.
 3. **Global monotonic guard** as the floor: `ctx.tools.guard()` denies runtime calls to `write` / `edit`. Scoped restrictions are not inherited by subagents; only a global guard covers them too.
 
+Note: step 2 removes the built-in tool names entirely, which breaks any name-matched guard — see the [warning above](#warning-this-bypasses-name-matched-guards).
+
 `bash` / `pwsh` are **not hard-blocked** — only prompt-constrained. Shell redirection writes files in ways a tool-layer guard cannot inspect reliably, and pretending otherwise would be security theater.
 
 ## Installation
@@ -160,6 +224,39 @@ For real type checking, run `npm run typecheck` inside a dsh source checkout.
 1. Snapshots contain **raw file contents** and may include secrets, tokens, or `.env` values. Permissions are `0700/0600`, but do **not** put the backup root in a repository or in a cloud sync folder (OneDrive, Dropbox).
 2. The default root lives under `~/.dsh/`, outside any workspace, so `git clean -fdx` cannot reach it. If you point `DSH_SAFETY_BACKUP_DIR` inside a workspace, one `git clean -fdx` will delete every snapshot.
 3. Protected (`.keep`) snapshots are never auto-removed; that is the only legitimate way to exhaust the quota. Once exhausted, writes are refused until you act.
+
+## Emergency recovery
+
+This plugin changes how dsh writes files, so it must be bypassable when it breaks itself. Three paths, none of which depend on the plugin:
+
+1. **Disable governance only**: remove the `safety-governance` entry from `$DSH_HOME/profiles/<name>/cordis.patch.yml`, then restart. The tools stay; the enforcement stops.
+2. **Take the plugin offline**: `dsh plugin --profile <name> remove dsh-safety-toolkit`, then restart.
+3. **Worst case**: edit that `cordis.patch.yml` by hand, or delete this package from the profile's dependency directory.
+
+On Windows, `$DSH_HOME` defaults to `C:\Users\<you>\.dsh`.
+
+## Self-reference risks
+
+The plugin runs inside dsh and also changes dsh's behavior, so three things are worth knowing:
+
+- **Source edits do not take effect immediately.** Modules are already loaded; changes apply on restart. "The model raised its own quota default" is therefore not instant escalation — it is a **persistent backdoor that activates after a restart**.
+- **Workspace isolation is the first line of defense.** Every file tool (including `safe_edit`) is confined to the session workspace. With the plugin source outside that workspace, the model cannot reach it. **Do not make the plugin directory an agent workspace while developing.**
+- **Basename-based blocks only raise the cost.** A guard that refuses writes to `retention.ts` can be routed around by renaming the file. Real boundaries come from OS permissions and directory isolation, not from tool-layer rules.
+
+## Updating
+
+Git dependencies pin a specific commit, so updates are not automatic:
+
+```sh
+# Most reliable: remove and re-add to pull the latest commit
+dsh plugin --profile <name> remove dsh-safety-toolkit
+dsh plugin --profile <name> add github:SilverCrossing/dsh-safety-toolkit
+
+# Or try update first (it may not re-resolve the git commit)
+dsh plugin --profile <name> update dsh-safety-toolkit
+```
+
+You **must restart dsh** afterwards: the composition is evaluated at startup, and hot reload does not cover bundle membership changes. Confirm the version in the profile's `package.json`.
 
 ## License
 
