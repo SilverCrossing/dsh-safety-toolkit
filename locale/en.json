@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Safety Toolkit",
+    "description": "File editing with snapshots, syntax gates and rollback, plus a governance layer for write tools."
+  }
+}

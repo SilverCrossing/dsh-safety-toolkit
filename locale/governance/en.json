@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Write Governance",
+    "description": "Removes the built-in write/edit tools and guards runtime calls, with guidance for the shell this deployment actually has."
+  }
+}

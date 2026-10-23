@@ -160,6 +160,21 @@ Note: step 2 removes the built-in tool names entirely, which breaks any name-mat
 
 `bash` / `pwsh` are **not hard-blocked** — only prompt-constrained. Shell redirection writes files in ways a tool-layer guard cannot inspect reliably, and pretending otherwise would be security theater.
 
+## Interface language
+
+The title and description shown in the plugin manager come from `locale/` and follow the interface language:
+
+| Entry | 中文 | English |
+| --- | --- | --- |
+| Toolkit | 安全工具包 | Safety Toolkit |
+| Governance plugin | 写工具治理 | Write Governance |
+
+Changing wording only requires editing `locale/*.json`; no rebuild is needed, since these are pure data files.
+
+To add a third language, copy `locale/xx.json` and fill in the same `meta.title` / `meta.description`. `en.json` must stay — it is the discovery entry point.
+
+Note: this affects **plugin presentation only**. Tool names, tool descriptions and model-facing error text are read by the model and do not vary with the interface language.
+
 ## Installation
 
 ### From GitHub

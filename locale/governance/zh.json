@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "写工具治理",
+    "description": "把内置 write/edit 从工具表移除，并用全局守卫拦截运行期调用，附实际 shell 的使用约束。"
+  }
+}

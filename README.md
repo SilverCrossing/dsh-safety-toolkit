@@ -161,6 +161,21 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 
 `bash` / `pwsh` **不做硬约束**，只做提示词软约束：shell 重定向写文件的方式，工具层守卫无法可靠检查，假装拦得住只是安全表演。
 
+## 界面语言
+
+插件管理页显示的标题与描述来自 `locale/`，跟随界面语言切换：
+
+| 条目 | 中文 | English |
+| --- | --- | --- |
+| 工具包 | 安全工具包 | Safety Toolkit |
+| 治理插件 | 写工具治理 | Write Governance |
+
+改文案只需要编辑 `locale/*.json`，不需要重新构建（那是纯数据文件）。
+
+要加第三种语言，复制一份 `locale/xx.json` 并填同样的 `meta.title` / `meta.description` 即可；`en.json` 必须保留，它是语言发现入口。
+
+注意：这只影响**插件展示**。工具名、工具描述、返回给模型的错误信息是给模型读的，不随界面语言变化。
+
 ## 安装
 
 ### 方式一：从 GitHub 安装

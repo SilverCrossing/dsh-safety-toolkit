@@ -24,10 +24,14 @@
       "types": "./lib/contract.d.ts",
       "default": "./lib/contract.js"
     },
+    "./locale/*.json": "./locale/*.json",
+    "./governance/locale/*.json": "./locale/governance/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "locale/*.json",
+    "locale/governance/*.json",
     "cordis.patch.yml",
     "LICENSE",
     "README.md",
