@@ -176,6 +176,8 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 
 注意：这只影响**插件展示**。工具名、工具描述、返回给模型的错误信息是给模型读的，不随界面语言变化。
 
+插件卡片图标由 `package.json` 顶层的 `"icon": "./icon.svg"` 提供；治理子插件通过 `"./governance/icon": "./icon.svg"` 共用同一张图。图片要求自包含、不超过 256 KiB，支持 SVG / PNG / JPEG / WebP。
+
 ## 安装
 
 ### 方式一：从 GitHub 安装

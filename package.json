@@ -11,6 +11,7 @@
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "icon": "./icon.svg",
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -26,12 +27,14 @@
     },
     "./locale/*.json": "./locale/*.json",
     "./governance/locale/*.json": "./locale/governance/*.json",
+    "./governance/icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "locale/*.json",
     "locale/governance/*.json",
+    "icon.svg",
     "cordis.patch.yml",
     "LICENSE",
     "README.md",

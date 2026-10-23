@@ -175,6 +175,8 @@ To add a third language, copy `locale/xx.json` and fill in the same `meta.title`
 
 Note: this affects **plugin presentation only**. Tool names, tool descriptions and model-facing error text are read by the model and do not vary with the interface language.
 
+The plugin card icon comes from `"icon": "./icon.svg"` at the top level of `package.json`; the governance sub-plugin shares the same file via `"./governance/icon": "./icon.svg"`. Images must be self-contained and under 256 KiB; SVG / PNG / JPEG / WebP are supported.
+
 ## Installation
 
 ### From GitHub
