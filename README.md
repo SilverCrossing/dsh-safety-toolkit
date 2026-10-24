@@ -149,6 +149,52 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 | `DSH_SAFETY_BACKUP_THROTTLE_MINUTES` | `5` | 正常状态下的清理间隔；降级状态不节流 |
 | `DSH_SAFETY_BACKUP_MIN_FREE_MB` | `100` | 备份分区最低剩余空间，不足则拒绝写入 |
 
+## 操作日志
+
+每次调用本插件的 7 个工具都会写一条审计记录，用于事后追溯“谁在什么时候动了哪个文件”。
+
+位置：`~/.dsh/log/YYYY-MM-DD.jsonl`（Windows 为 `C:\Users\<你>\.dsh\log`），按本地日期一天一个文件，一行一个 JSON：
+
+```json
+{"ts":"2026-10-24T20:38:06.127+08:00","tool":"safe_edit","ok":true,"paths":["/w/a.ts"],"backup":"20261024T200806127Z~edit.bak"}
+{"ts":"2026-10-24T20:38:26.192+08:00","tool":"safe_write","ok":false,"paths":["/w/b.ts"],"detail":"语法门禁未通过，已回滚"}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `ts` | 本地时间，带时区偏移 |
+| `tool` | 工具名 |
+| `ok` | 是否成功 |
+| `paths` | 本次调用涉及的文件路径（`multi_edit` 会列出全部） |
+| `backup` | 产生的快照 id，可直接用作 `safe_rollback` 的 `backup_name` |
+| `detail` | 失败原因前 200 字符（**不含文件内容**） |
+
+设计约束：
+
+- **只记录本插件自己的工具**，不碰 `read` / `grep` / `bash` 等
+- **不记录文件内容**，只有路径与结果
+- 写入失败只警告，绝不影响工具调用
+- 并发调用按发生顺序串行写入（队列，不是完成顺序）
+- 超过保留期的文件自动删除（最多每 6 小时检查一次）；单日文件超过上限后停止追加
+
+查询示例：
+
+```powershell
+# 今天这个文件被谁动过
+Select-String C:\Users\<you>\.dsh\log\*.jsonl -Pattern 'a\.ts'
+# 今天所有失败的操作
+Get-Content C:\Users\<you>\.dsh\log\2026-10-24.jsonl | Select-String '"ok":false'
+```
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `DSH_SAFETY_AUDIT` | 开启 | 设为 `off` 关闭日志 |
+| `DSH_SAFETY_AUDIT_DIR` | `~/.dsh/log` | 日志根目录 |
+| `DSH_SAFETY_AUDIT_DAYS` | `7` | 保留天数，`0` 表示不自动删 |
+| `DSH_SAFETY_AUDIT_MAX_MB` | `10` | 单日文件上限，达到后当日停止记录 |
+
+存储成本：单条约 300 字节，每天 100 次操作约 30 KB，7 天约 210 KB。相比 1 GB 的快照配额可以忽略。
+
 ## 治理插件（governance）
 
 启用后做三件事：
@@ -236,12 +282,35 @@ npm run build
 - **Python 解释器需要能真实执行**：门禁依次探测 `python3` / `python` / `py -3` 并跑一段真代码验证。Windows 上的应用执行别名占位符（退出码 9009）会被正确判为"检查器不可用"而非语法错误。可用 `DSH_SAFETY_PYTHON` 指定解释器。
 - **只有非零退出的明确语法诊断才算错误**：检查器本身异常时返回 `skipped`，宁可放行也不误判。
 - **敏感文件不做特殊处理**：`.env`、密钥文件同样按普通文件快照。如果不想让它们落盘，请自行调整 `DSH_SAFETY_BACKUP_DIR` 或不要用安全工具改这些文件。
+- **`test_runner` 会执行项目代码**：它跑的是你项目的测试，权限等同于你在终端里手动执行同一条命令。不要让它在一个不可信的仓库里跑测试。
 
 ## 安全提醒
 
 1. 快照里是**文件原文**，可能包含密钥、token、`.env` 内容。目录权限已设 `0700/0600`，但仍请**不要**把备份根放进版本库，也不要放进 OneDrive / Dropbox 这类同步目录。
 2. 默认备份根在 `~/.dsh/` 下，不在工作区，所以 `git clean -fdx` 碰不到；一旦你把 `DSH_SAFETY_BACKUP_DIR` 指到工作区内，一次 `git clean -fdx` 就会连同快照一起删掉。
 3. 受保护快照（`.keep`）永不自动删除，这是配额被吃满的唯一合法原因。满了会拒绝写入，需要手动处理。
+4. 审计日志含**文件绝对路径**（不含内容）。虽然默认在 `~/.dsh/log/` 下，仍请不要放进版本库或云同步目录。
+
+## 静态扫描会看到什么
+
+用启发式扫描器扫这个仓库，会命中两类警告，它们都不是缺陷：
+
+| 命中 | 为什么存在 |
+| --- | --- |
+| `process.env.*` 读取 | 配置入口：备份根、`DSH_HOME`、Python 解释器、配额参数 |
+| `child_process.spawn` | 语法门禁要调 `python3` / `node` / `gofmt`，测试执行要调 `pytest` / `go` / `cargo` / `npm` |
+
+本插件**不使用**网络（无 `http` / `https` / `net` / `dgram`），**不使用**动态执行（无 `eval` / `Function` / `vm`）。所有子进程调用都是「固定命令 + 参数数组」，不经过 shell，因此不存在命令拼接注入。
+
+### 子进程如何解析
+
+不把裸命令名交给系统，而是先按 `PATH` 解析成绝对路径再执行。原因：Windows 的 `SearchPathW` 搜索顺序**包含当前目录**，而进程 cwd 就是 agent 工作区——如果直接 `spawn('python3')`，模型可以在工作区放一个 `python3.exe`，让门禁去执行它（CWE-426，不受信任的搜索路径）。
+
+实现上还做了两件事：`PATH` 里的空项被跳过（POSIX 中空项表示当前目录）；`DSH_SAFETY_PYTHON` 只接受绝对路径，相对值会被忽略并告警。
+
+### 残留风险
+
+子进程的可信度最终取决于 `PATH` 本身。如果你把当前目录或某个可写目录显式写进 `PATH`，上面那层防护就失效了——那是环境配置问题，工具无法代偿。
 
 ## 紧急恢复
 

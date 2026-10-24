@@ -146,7 +146,53 @@ The refusal means "your work cannot be made reversible right now", not "the tool
 | `DSH_SAFETY_BACKUP_KEEP_PER_FILE` | `10` | Snapshots kept per source file |
 | `DSH_SAFETY_BACKUP_THROTTLE_MINUTES` | `5` | Prune interval while healthy; degraded state bypasses it |
 | `DSH_SAFETY_BACKUP_MIN_FREE_MB` | `100` | Minimum free space on the backup partition |
-| `DSH_SAFETY_PYTHON` | — | Pin a Python interpreter path for the syntax gate |
+| `DSH_SAFETY_PYTHON` | — | Absolute path of a Python interpreter for the syntax gate; relative values are ignored |
+
+## Audit trail
+
+Every call to one of the toolkit's seven tools writes one audit record, so you can answer "who touched this file, when, and how did it end" after the fact.
+
+Location: `~/.dsh/log/YYYY-MM-DD.jsonl` (on Windows, `C:\Users\<you>\.dsh\log`). One file per local day, one JSON per line:
+
+```json
+{"ts":"2026-10-24T20:38:06.127+08:00","tool":"safe_edit","ok":true,"paths":["/w/a.ts"],"backup":"20261024T200806127Z~edit.bak"}
+{"ts":"2026-10-24T20:38:26.192+08:00","tool":"safe_write","ok":false,"paths":["/w/b.ts"],"detail":"syntax gate failed, rolled back"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ts` | Local time with UTC offset |
+| `tool` | Tool name |
+| `ok` | Whether the call succeeded |
+| `paths` | Files touched by this call (`multi_edit` lists all of them) |
+| `backup` | Snapshot id, usable directly as `safe_rollback`'s `backup_name` |
+| `detail` | First 200 characters of the failure reason (**never file contents**) |
+
+Design constraints:
+
+- **Only this plugin's own tools are recorded** — never `read`, `grep`, `bash`
+- **No file contents** — paths and outcomes only
+- A failed write logs a warning and never affects the tool call
+- Concurrent calls are queued, so lines keep the order calls happened in
+- Files past the retention window are deleted (checked every six hours at most); a day file stops growing at the size cap
+
+Querying:
+
+```powershell
+# Who touched this file today
+Select-String C:\Users\<you>\.dsh\log\*.jsonl -Pattern 'a\.ts'
+# Every failure today
+Get-Content C:\Users\<you>\.dsh\log\2026-10-24.jsonl | Select-String '"ok":false'
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DSH_SAFETY_AUDIT` | enabled | Set to `off` to disable logging |
+| `DSH_SAFETY_AUDIT_DIR` | `~/.dsh/log` | Log root |
+| `DSH_SAFETY_AUDIT_DAYS` | `7` | Retention in days; `0` disables pruning |
+| `DSH_SAFETY_AUDIT_MAX_MB` | `10` | Per-day file cap; the day stops recording past it |
+
+Storage cost: about 300 bytes per entry — roughly 30 KB for 100 operations a day, 210 KB for a week. Negligible next to the 1 GB snapshot quota.
 
 ## Governance plugin
 
@@ -235,12 +281,35 @@ For real type checking, run `npm run typecheck` inside a dsh source checkout.
 - **The Python interpreter must actually execute.** The gate probes `python3` / `python` / `py -3` by running real code. Windows App Execution Alias stubs (exit code 9009) are correctly classified as "checker unavailable", not as syntax errors.
 - **Only an explicit syntax diagnostic counts as an error.** If the checker itself misbehaves, the gate returns `skipped` rather than blocking a valid write.
 - **Sensitive files get no special treatment.** `.env` and key files are snapshotted like any other file. If you do not want them on disk, change `DSH_SAFETY_BACKUP_DIR` or avoid editing them through these tools.
+- **`test_runner` executes project code.** It runs your project's tests, with the same privileges you would have running that command in a terminal. Do not let it run tests in an untrusted repository.
 
 ## Security notes
 
 1. Snapshots contain **raw file contents** and may include secrets, tokens, or `.env` values. Permissions are `0700/0600`, but do **not** put the backup root in a repository or in a cloud sync folder (OneDrive, Dropbox).
 2. The default root lives under `~/.dsh/`, outside any workspace, so `git clean -fdx` cannot reach it. If you point `DSH_SAFETY_BACKUP_DIR` inside a workspace, one `git clean -fdx` will delete every snapshot.
 3. Protected (`.keep`) snapshots are never auto-removed; that is the only legitimate way to exhaust the quota. Once exhausted, writes are refused until you act.
+4. The audit trail records **absolute file paths** (never contents). It lives under `~/.dsh/log/` by default; still, do not put it in a repository or a cloud sync folder.
+
+## What a static scanner sees
+
+A heuristic scanner will flag two categories here. Neither is a defect:
+
+| Finding | Why it exists |
+| --- | --- |
+| `process.env.*` reads | Configuration entry points: backup root, `DSH_HOME`, Python interpreter, quota settings |
+| `child_process.spawn` | The syntax gate runs `python3` / `node` / `gofmt`; test execution runs `pytest` / `go` / `cargo` / `npm` |
+
+This plugin makes **no network calls** (no `http` / `https` / `net` / `dgram`) and does **no dynamic execution** (no `eval` / `Function` / `vm`). Every child process is a fixed command plus an argument vector, never routed through a shell — so there is no command-injection surface from string concatenation.
+
+### How child processes are resolved
+
+A bare command name is never handed to the OS. It is first resolved to an absolute path against `PATH`, then executed. The reason: on Windows, `SearchPathW` includes the **current directory** in its search order, and the process cwd is the agent workspace — so a plain `spawn('python3')` would let the model plant a `python3.exe` in the workspace and have the gate execute it (CWE-426, untrusted search path).
+
+Two more details: empty `PATH` entries are skipped (on POSIX an empty entry means the current directory), and `DSH_SAFETY_PYTHON` accepts absolute paths only — relative values are ignored with a warning.
+
+### Residual risk
+
+Trust in child processes ultimately rests on `PATH` itself. If you explicitly put the current directory or a writable directory on `PATH`, the protection above is gone — that is an environment configuration issue the tool cannot compensate for.
 
 ## Emergency recovery
 

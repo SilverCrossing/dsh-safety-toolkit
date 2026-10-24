@@ -1,12 +1,12 @@
 /**
  * Safety toolkit plugin entry.
  *
- * Registers the seven tools, then publishes a machine-readable contract so that
- * guard plugins can discover which tool names this package provides and which
- * built-in names it replaces.
+ * Registers the seven tools, publishes a machine-readable contract, and writes
+ * an append-only audit trail for every call to its own tools.
  *
- * Governance (denying the built-in `write`/`edit`) lives in `governance.ts` so
- * the two can be enabled independently.
+ * The audit listener rides `tools/result`: an emit-only observation point that
+ * receives the frozen final outcome, so it can never alter a result and a
+ * throwing listener cannot fail the call.
  */
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { TOOL_CONTRACT, type ToolContract } from './contract.js';

@@ -10,7 +10,7 @@
  */
 
 import { readFile } from 'node:fs/promises'
-import { extname } from 'node:path'
+import { extname, isAbsolute } from 'node:path'
 
 import { runProcess } from './proc.js'
 
@@ -88,10 +88,17 @@ let pythonProbe: Promise<PythonCandidate | undefined> | undefined
  */
 async function probePython(cwd: string): Promise<PythonCandidate | undefined> {
   pythonProbe ??= (async () => {
-    const override = process.env.DSH_SAFETY_PYTHON
-    const candidates: readonly PythonCandidate[] = override !== undefined && override.trim() !== ''
-      ? [{ command: override.trim(), args: [] }]
-      : PYTHON_CANDIDATES
+    const override = process.env.DSH_SAFETY_PYTHON?.trim()
+    let candidates: readonly PythonCandidate[] = PYTHON_CANDIDATES
+    if (override !== undefined && override !== '') {
+      if (isAbsolute(override)) {
+        candidates = [{ command: override, args: [] }]
+      } else {
+        // A relative override would go through PATH lookup, which is exactly the
+        // trust boundary we refuse to widen. Ignore it and fall back to probes.
+        console.warn(`[safety-toolkit] DSH_SAFETY_PYTHON 必须是绝对路径，已忽略：${override}`)
+      }
+    }
     for (const candidate of candidates) {
       const probe = await runProcess(candidate.command, [...candidate.args, '-c', PROBE_SCRIPT], {
         cwd,
