@@ -182,9 +182,9 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 
 ```powershell
 # 今天这个文件被谁动过
-Select-String C:\Users\<you>\.dsh\logs\safety-toolkit\*.jsonl -Pattern 'a\.ts'
+Select-String C:\Users\<你>\.dsh\logs\safety-toolkit\*.jsonl -Pattern 'a\.ts'
 # 今天所有失败的操作
-Get-Content C:\Users\<you>\.dsh\logs\safety-toolkit\2026-10-24.jsonl | Select-String '"ok":false'
+Get-Content C:\Users\<你>\.dsh\logs\safety-toolkit\2026-10-24.jsonl | Select-String '"ok":false'
 ```
 
 | 环境变量 | 默认 | 含义 |
