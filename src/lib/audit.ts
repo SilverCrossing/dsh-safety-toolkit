@@ -1,9 +1,13 @@
 /**
  * Append-only audit trail for the toolkit's own tool calls.
  *
- * Layout: `<root>/<YYYY-MM-DD>.jsonl` — one flat file per local day, one JSON
- * per line. Flat beats per-day folders here: fewer inodes, one file to grep,
- * and the whole week fits in a single `Select-String`.
+ * Layout: `<root>/<YYYY-MM-DD>.jsonl`, root defaulting to
+ * `$DSH_HOME/logs/safety-toolkit`. The `logs/<plugin>/` shape is shared with
+ * the guard plugins, so all of them live under one tree while each keeps its
+ * own subdirectory and its own pruning.
+ *
+ * `.jsonl` is kept rather than `.log`: the content is one JSON object per line,
+ * and the extension says so. Globbing `logs/<plugin>/` still covers both kinds.
  *
  * Goals, in order:
  *  1. Answer "who touched this file, when, and with what result" after the fact.
@@ -32,6 +36,8 @@ export interface AuditPolicy {
 export interface AuditEntry {
   /** Local ISO timestamp with offset, e.g. 2026-10-24T20:36:12.345+08:00 */
   readonly ts: string
+  /** Registry-assigned call id, for cross-referencing the dsh session log. */
+  readonly callId?: string
   readonly tool: string
   readonly ok: boolean
   /** Target paths extracted from the call arguments. */
@@ -48,9 +54,9 @@ function positiveInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? value : fallback
 }
 
-/** Audit root — a flat `log` directory beside the snapshot root. */
+/** Audit root — one subdirectory per plugin under the shared `logs` tree. */
 export function auditRoot(): string {
-  const override = process.env.DSH_SAFETY_AUDIT_DIR?.trim()
+  const override = (process.env.DSH_SAFETY_LOG_DIR ?? process.env.DSH_SAFETY_AUDIT_DIR)?.trim()
   if (override !== undefined && override !== '') {
     return override.startsWith('~')
       ? join(homedir(), override.slice(1))
@@ -58,16 +64,18 @@ export function auditRoot(): string {
   }
   const home = process.env.DSH_HOME?.trim()
   const base = home !== undefined && home !== '' ? home : join(homedir(), '.dsh')
-  return join(base, 'log')
+  return join(base, 'logs', 'safety-toolkit')
 }
 
 export function loadAuditPolicy(env: NodeJS.ProcessEnv = process.env): AuditPolicy {
-  const disabled = (env.DSH_SAFETY_AUDIT ?? '').trim().toLowerCase()
+  // `DSH_SAFETY_LOG*` matches the guard plugins' naming; the older
+  // `DSH_SAFETY_AUDIT*` names stay supported so existing patches keep working.
+  const disabled = (env.DSH_SAFETY_LOG ?? env.DSH_SAFETY_AUDIT ?? '').trim().toLowerCase()
   return {
     enabled: disabled !== 'off' && disabled !== '0' && disabled !== 'false',
     root: auditRoot(),
-    retentionDays: positiveInt(env.DSH_SAFETY_AUDIT_DAYS, 7),
-    maxFileBytes: positiveInt(env.DSH_SAFETY_AUDIT_MAX_MB, 10) * 1024 * 1024,
+    retentionDays: positiveInt(env.DSH_SAFETY_LOG_DAYS ?? env.DSH_SAFETY_AUDIT_DAYS, 7),
+    maxFileBytes: positiveInt(env.DSH_SAFETY_LOG_MAX_MB ?? env.DSH_SAFETY_AUDIT_MAX_MB, 10) * 1024 * 1024,
   }
 }
 

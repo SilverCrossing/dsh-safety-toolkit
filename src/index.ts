@@ -40,6 +40,8 @@ interface ContentBlockLike {
 interface ExecutionLike {
   readonly name: string
   readonly arguments: unknown
+  /** Registry-assigned call id; lets this line be matched to the dsh session log. */
+  readonly callId?: unknown
 }
 
 interface ResultLike {
@@ -98,9 +100,11 @@ export function apply(ctx: Context): void {
       const paths = pathArgs.flatMap(argPath => extractPaths(exec.arguments, argPath))
       const backup = result.value?.files?.[0]?.backupId
       const detail = result.isError === true ? firstText(result.content) : undefined
+      const callId = exec.callId === undefined ? undefined : String(exec.callId)
 
       void appendAudit({
         ts: localIso(new Date()),
+        ...(callId === undefined ? {} : { callId }),
         tool: exec.name,
         ok: result.isError !== true,
         paths,

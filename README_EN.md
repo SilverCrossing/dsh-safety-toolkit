@@ -152,7 +152,7 @@ The refusal means "your work cannot be made reversible right now", not "the tool
 
 Every call to one of the toolkit's seven tools writes one audit record, so you can answer "who touched this file, when, and how did it end" after the fact.
 
-Location: `~/.dsh/log/YYYY-MM-DD.jsonl` (on Windows, `C:\Users\<you>\.dsh\log`). One file per local day, one JSON per line:
+Location: `~/.dsh/logs/safety-toolkit/YYYY-MM-DD.jsonl` (on Windows, `C:\Users\<you>\.dsh\logs\safety-toolkit`). One file per local day, one JSON per line:
 
 ```json
 {"ts":"2026-10-24T20:38:06.127+08:00","tool":"safe_edit","ok":true,"paths":["/w/a.ts"],"backup":"20261024T200806127Z~edit.bak"}
@@ -162,6 +162,7 @@ Location: `~/.dsh/log/YYYY-MM-DD.jsonl` (on Windows, `C:\Users\<you>\.dsh\log`).
 | Field | Meaning |
 | --- | --- |
 | `ts` | Local time with UTC offset |
+| `callId` | Call id, for locating the same call in the dsh session log |
 | `tool` | Tool name |
 | `ok` | Whether the call succeeded |
 | `paths` | Files touched by this call (`multi_edit` lists all of them) |
@@ -180,17 +181,41 @@ Querying:
 
 ```powershell
 # Who touched this file today
-Select-String C:\Users\<you>\.dsh\log\*.jsonl -Pattern 'a\.ts'
+Select-String C:\Users\<you>\.dsh\logs\safety-toolkit\*.jsonl -Pattern 'a\.ts'
 # Every failure today
-Get-Content C:\Users\<you>\.dsh\log\2026-10-24.jsonl | Select-String '"ok":false'
+Get-Content C:\Users\<you>\.dsh\logs\safety-toolkit\2026-10-24.jsonl | Select-String '"ok":false'
 ```
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DSH_SAFETY_AUDIT` | enabled | Set to `off` to disable logging |
-| `DSH_SAFETY_AUDIT_DIR` | `~/.dsh/log` | Log root |
-| `DSH_SAFETY_AUDIT_DAYS` | `7` | Retention in days; `0` disables pruning |
-| `DSH_SAFETY_AUDIT_MAX_MB` | `10` | Per-day file cap; the day stops recording past it |
+| `DSH_SAFETY_LOG` | enabled | Set to `off` to disable logging |
+| `DSH_SAFETY_LOG_DIR` | `~/.dsh/logs/safety-toolkit` | Log directory |
+| `DSH_SAFETY_LOG_DAYS` | `7` | Retention in days; `0` disables pruning |
+| `DSH_SAFETY_LOG_MAX_MB` | `10` | Per-day file cap; the day stops recording past it |
+
+The older `DSH_SAFETY_AUDIT*` names remain supported as fallbacks.
+
+### Relationship to guard logs
+
+Both live in one tree, each in its own subdirectory:
+
+```
+$DSH_HOME/logs/
+  write-approval-guard/2026-10-24.log      <- guard: one line per decision
+  safety-toolkit/2026-10-24.jsonl          <- this plugin: one line per tool result
+```
+
+They record different things, and only together are they complete:
+
+| | Guard | This plugin |
+| --- | --- | --- |
+| Granularity | each **decision** (ask / deny / cancel / allow / mode) | each **tool result** (ok / paths / backup) |
+| Answers | was it blocked, and who approved it | which file changed, which snapshot was made |
+| Format | plain text `.log` | JSON Lines `.jsonl` |
+
+Reconstruction order: find the decision in the guard log, use `callId` to locate the model's reasoning in the dsh session log, then roll back with `backup` from this plugin's log.
+
+The differing extensions are deliberate: `.jsonl` says "one JSON per line", `.log` is for human reading. Globbing `logs/<plugin>/` covers both.
 
 Storage cost: about 300 bytes per entry — roughly 30 KB for 100 operations a day, 210 KB for a week. Negligible next to the 1 GB snapshot quota.
 
@@ -288,7 +313,7 @@ For real type checking, run `npm run typecheck` inside a dsh source checkout.
 1. Snapshots contain **raw file contents** and may include secrets, tokens, or `.env` values. Permissions are `0700/0600`, but do **not** put the backup root in a repository or in a cloud sync folder (OneDrive, Dropbox).
 2. The default root lives under `~/.dsh/`, outside any workspace, so `git clean -fdx` cannot reach it. If you point `DSH_SAFETY_BACKUP_DIR` inside a workspace, one `git clean -fdx` will delete every snapshot.
 3. Protected (`.keep`) snapshots are never auto-removed; that is the only legitimate way to exhaust the quota. Once exhausted, writes are refused until you act.
-4. The audit trail records **absolute file paths** (never contents). It lives under `~/.dsh/log/` by default; still, do not put it in a repository or a cloud sync folder.
+4. The audit trail records **absolute file paths** (never contents). It lives under `~/.dsh/logs/safety-toolkit/` by default; still, do not put it in a repository or a cloud sync folder.
 
 ## What a static scanner sees
 

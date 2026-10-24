@@ -1,9 +1,13 @@
 /**
  * Append-only audit trail for the toolkit's own tool calls.
  *
- * Layout: `<root>/<YYYY-MM-DD>.jsonl` — one flat file per local day, one JSON
- * per line. Flat beats per-day folders here: fewer inodes, one file to grep,
- * and the whole week fits in a single `Select-String`.
+ * Layout: `<root>/<YYYY-MM-DD>.jsonl`, root defaulting to
+ * `$DSH_HOME/logs/safety-toolkit`. The `logs/<plugin>/` shape is shared with
+ * the guard plugins, so all of them live under one tree while each keeps its
+ * own subdirectory and its own pruning.
+ *
+ * `.jsonl` is kept rather than `.log`: the content is one JSON object per line,
+ * and the extension says so. Globbing `logs/<plugin>/` still covers both kinds.
  *
  * Goals, in order:
  *  1. Answer "who touched this file, when, and with what result" after the fact.
@@ -24,6 +28,8 @@ export interface AuditPolicy {
 export interface AuditEntry {
     /** Local ISO timestamp with offset, e.g. 2026-10-24T20:36:12.345+08:00 */
     readonly ts: string;
+    /** Registry-assigned call id, for cross-referencing the dsh session log. */
+    readonly callId?: string;
     readonly tool: string;
     readonly ok: boolean;
     /** Target paths extracted from the call arguments. */
@@ -33,7 +39,7 @@ export interface AuditEntry {
     /** Short failure reason; never file content. */
     readonly detail?: string;
 }
-/** Audit root — a flat `log` directory beside the snapshot root. */
+/** Audit root — one subdirectory per plugin under the shared `logs` tree. */
 export declare function auditRoot(): string;
 export declare function loadAuditPolicy(env?: NodeJS.ProcessEnv): AuditPolicy;
 /** Local-time ISO with offset — readable without conversion. */

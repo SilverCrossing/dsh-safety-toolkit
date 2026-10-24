@@ -153,7 +153,7 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 
 每次调用本插件的 7 个工具都会写一条审计记录，用于事后追溯“谁在什么时候动了哪个文件”。
 
-位置：`~/.dsh/log/YYYY-MM-DD.jsonl`（Windows 为 `C:\Users\<你>\.dsh\log`），按本地日期一天一个文件，一行一个 JSON：
+位置：`~/.dsh/logs/safety-toolkit/YYYY-MM-DD.jsonl`（Windows 为 `C:\Users\<你>\.dsh\logs\safety-toolkit`），按本地日期一天一个文件，一行一个 JSON：
 
 ```json
 {"ts":"2026-10-24T20:38:06.127+08:00","tool":"safe_edit","ok":true,"paths":["/w/a.ts"],"backup":"20261024T200806127Z~edit.bak"}
@@ -163,6 +163,7 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 | 字段 | 含义 |
 | --- | --- |
 | `ts` | 本地时间，带时区偏移 |
+| `callId` | 本次工具调用的 id，可在 dsh 会话日志中精确定位同一次调用 |
 | `tool` | 工具名 |
 | `ok` | 是否成功 |
 | `paths` | 本次调用涉及的文件路径（`multi_edit` 会列出全部） |
@@ -181,17 +182,41 @@ import { TOOL_CONTRACT } from 'dsh-safety-toolkit/contract'
 
 ```powershell
 # 今天这个文件被谁动过
-Select-String C:\Users\<you>\.dsh\log\*.jsonl -Pattern 'a\.ts'
+Select-String C:\Users\<you>\.dsh\logs\safety-toolkit\*.jsonl -Pattern 'a\.ts'
 # 今天所有失败的操作
-Get-Content C:\Users\<you>\.dsh\log\2026-10-24.jsonl | Select-String '"ok":false'
+Get-Content C:\Users\<you>\.dsh\logs\safety-toolkit\2026-10-24.jsonl | Select-String '"ok":false'
 ```
 
 | 环境变量 | 默认 | 含义 |
 | --- | --- | --- |
-| `DSH_SAFETY_AUDIT` | 开启 | 设为 `off` 关闭日志 |
-| `DSH_SAFETY_AUDIT_DIR` | `~/.dsh/log` | 日志根目录 |
-| `DSH_SAFETY_AUDIT_DAYS` | `7` | 保留天数，`0` 表示不自动删 |
-| `DSH_SAFETY_AUDIT_MAX_MB` | `10` | 单日文件上限，达到后当日停止记录 |
+| `DSH_SAFETY_LOG` | 开启 | 设为 `off` 关闭日志 |
+| `DSH_SAFETY_LOG_DIR` | `~/.dsh/logs/safety-toolkit` | 日志目录 |
+| `DSH_SAFETY_LOG_DAYS` | `7` | 保留天数，`0` 表示不自动删 |
+| `DSH_SAFETY_LOG_MAX_MB` | `10` | 单日文件上限，达到后当日停止记录 |
+
+旧的 `DSH_SAFETY_AUDIT*` 变量名仍然兼容（没设新名时回退到旧名）。
+
+### 与护栏日志的关系
+
+两类日志默认在同一棵树、各自一个子目录：
+
+```
+$DSH_HOME/logs/
+  write-approval-guard/2026-10-24.log      ← 护栏：每个判定一行
+  safety-toolkit/2026-10-24.jsonl          ← 本插件：每个调用结果一行
+```
+
+它们记的不是同一件事，合起来才完整：
+
+| | 护栏 | 本插件 |
+| --- | --- | --- |
+| 粒度 | 每次**判定**（ask / deny / cancel / allow / mode） | 每次**调用结果**（ok / paths / backup） |
+| 能回答 | 这次操作被拦了吗、谁批的 | 改了哪个文件、生成哪个快照 |
+| 格式 | 纯文本 `.log` | JSON Lines `.jsonl` |
+
+复盘顺序：先在护栏日志里找到那次判定，再用 `callId` 到 dsh 会话日志里找到模型当时的推理，最后用本插件日志里的 `backup` 直接回滚。
+
+扩展名不同是刻意的：`.jsonl` 表明每行是一个 JSON，`.log` 是给人读的文本；按 `logs/<插件名>/` 通配即可同时覆盖。
 
 存储成本：单条约 300 字节，每天 100 次操作约 30 KB，7 天约 210 KB。相比 1 GB 的快照配额可以忽略。
 
@@ -289,7 +314,7 @@ npm run build
 1. 快照里是**文件原文**，可能包含密钥、token、`.env` 内容。目录权限已设 `0700/0600`，但仍请**不要**把备份根放进版本库，也不要放进 OneDrive / Dropbox 这类同步目录。
 2. 默认备份根在 `~/.dsh/` 下，不在工作区，所以 `git clean -fdx` 碰不到；一旦你把 `DSH_SAFETY_BACKUP_DIR` 指到工作区内，一次 `git clean -fdx` 就会连同快照一起删掉。
 3. 受保护快照（`.keep`）永不自动删除，这是配额被吃满的唯一合法原因。满了会拒绝写入，需要手动处理。
-4. 审计日志含**文件绝对路径**（不含内容）。虽然默认在 `~/.dsh/log/` 下，仍请不要放进版本库或云同步目录。
+4. 审计日志含**文件绝对路径**（不含内容）。默认在 `~/.dsh/logs/safety-toolkit/` 下，仍请不要放进版本库或云同步目录。
 
 ## 静态扫描会看到什么
 
